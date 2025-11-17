@@ -1,253 +1,167 @@
-#ifndef MISCANTHUS_SENESCENCE_H
-#define MISCANTHUS_SENESCENCE_H
+#ifndef DELTA_TT_H
+#define DELTA_TT_H
 
 #include "../framework/module.h"
 #include "../framework/state_map.h"
-#include <cmath>
-/**
- * @class miscanthus_senescence
- * 
- * @brief Calculates leaf senescence based on: (1) ageing of leaves (2) maximum lai (3)frost.
- * maximum of the three senescnece is taken to represent current leaf senescence
- * This module is based on leaf senescene in APSIM (https://www.apsim.info/documentation/model-documentation/crop-module-documentation/plant/)
- * stem, root, and rhizome senescene are set to zero (hard coded )and yet to be implemented. 
- * for water stress see Figure 4 of https://link.springer.com/article/10.1007/s11258-013-0228-4.
- * A constant value of 0.5 for soil porosity is used, which should be updated from select soil (missing porosity)
- */
 
 namespace BioCroBML
 {
-class miscanthus_senescence : public differential_module
+/**
+ * // adapted from Mathews-Research-Group/biomass-crops-marginal-land
+ * essentially a direct_module version of thermal_time_trilinear
+ * @class delta_TT
+ *
+ * @brief Calculates the rate of thermal time accumulation using a trilinear model.
+ *
+ * ### Model overview
+ *
+ * The thermal time `t_th` represents the accumulated exposure of a plant to temperatures
+ * within some acceptable range that allows the plant to develop. The time rate of change
+ * of `t_th` is often referred to as the development rate `DR`. For an overview of the
+ * different methods that can be used for calculating thermal time and its development rate,
+ * see the following references:
+ *
+ * - [Campbell, G. S. & Norman, J. M. "Chapter 2: Temperature" in "An Introduction to
+ *   Environmental Biophysics" (1998)]
+ *   (https://dx.doi.org/10.1007/978-1-4612-1626-1_2)
+ *
+ * - [Yan, W. & Hunt, L. A. "An Equation for Modelling the Temperature Response
+ *   of Plants using only the Cardinal Temperatures" Ann Bot 84, 607–614 (1999)]
+ *   (https://dx.doi.org/10.1006/anbo.1999.0955)
+ *
+ * - [McMaster, G. S. & Moragues, M. "Crop Development Related to Temperature and
+ *   Photoperiod" in "Encyclopedia of Sustainability Science and Technology" (2018)]
+ *   (https://dx.doi.org/10.1007/978-1-4939-2493-6_384-3)
+ *
+ * This module implements a piecewise linear model that includes a range of optimal
+ * temperatures in addition to base and maximum temperatures. Due to its shape, this
+ * model is sometimes called "trapezoidal." This model is implemented in several other
+ * crop growth simulators, e.g:
+ *
+ * - `CROPSIM`, described in [Hunt, L. A. & Pararajasingham, S. "CROPSIM — WHEAT: A model
+ *   describing the growth and development of wheat." Can. J. Plant Sci. 75, 619–632 (1995)]
+ *   (https://dx.doi.org/10.4141/cjps95-107)
+ *
+ * - `CROPGRO`, described in [Piper et al. "Comparison of Two Phenology Models for Predicting
+ *   Flowering and Maturity Date of Soybean." Crop Science 36, 1606–1614 (1996)]
+ *   (https://dx.doi.org/10.2135/cropsci1996.0011183X003600060033x)
+ *
+ *
+ * In this model, `DR` is determined from the air temperature `T` according to:
+ *
+ * | DR                                                             | T range                         |
+ * | :------------------------------------------------------------: | :-----------------------------: |
+ * | `0`                                                            | `T <= T_base`                   |
+ * | `T - T_base`                                                   | `T_base < T <= T_opt_lower`     |
+ * | `T_opt_lower - T_base`                                         | `T_opt_lower < T <= T_opt_upper`|
+ * | `(T_max - T) * (T_opt_lower - T_base) / (T_max - T_opt_upper)` | `T_opt_upper < T <= T_max`      |
+ * | `0`                                                            | `T_max < T`                     |
+ *
+ * Thermal time has units of `degrees C * day` and the development rate, as written
+ * here, has units of `degrees C * day / day = degrees C`. This is a common formulation,
+ * reflecting the fact that average daily temperatures are often used to calculate the
+ * increase in thermal time during an entire day.
+ *
+ * This model is based on the observation that development rate is maximum at some
+ * optimum range of temperatures and decreases to zero at exceptionally low or high
+ * temperatures. It seems to be reasonably realistic for many plant species.
+ *
+ * This model can be characterized as a piecewise linear model having four cardinal
+ * temperatures. If some of these temperatures are unavailable, other piecewise
+ * linear models are available that require fewer cardinal temperatures:
+ * thermal_time_linear, thermal_time_linear_extended, and thermal_time_bilinear.
+ *
+ * ### BioCro module implementation
+ *
+ * In BioCro, we use the following names for this model's parameters:
+ * - ``'TTc'`` for the thermal time `t_th`
+ * - ``'temp'`` for the air temperature `T`
+ * - ``'tbase'`` for the base temperature `T_base`
+ * - ``'topt_lower'`` for the lower optimal temperature `T_opt_lower`
+ * - ``'topt_upper'`` for the upper optimal temperature `T_opt_upper`
+ * - ``'tmax'`` for the maximum temperature `T_max`
+ *
+ * Also note that time derivatives in BioCro are specified on a per hour basis, so a
+ * conversion factor of `24 hours per day` is required in the code as compared to the
+ * formulas presented above.
+ */
+class delta_TT : public direct_module
 {
-    public:
-    miscanthus_senescence(
+   public:
+    delta_TT(
         state_map const& input_quantities,
         state_map* output_quantities)
-        : differential_module{},
+        : direct_module{},
 
-        // Get pointers to input parameters
-        Leaf_ip{get_input(input_quantities, "Leaf")},
-        Stem_ip{get_input(input_quantities, "Stem")},
-        Root_ip{get_input(input_quantities, "Root")},
-        Rhizome_ip{get_input(input_quantities, "Rhizome")},
-                lai_max_ip{get_input(input_quantities, "lai_max")},
-                lai_ip{get_input(input_quantities, "lai")},
-                Sp_ip{get_input(input_quantities, "Sp")},
-                TTc_ip{get_input(input_quantities, "TTc")},
-                delta_TT_ip{get_input(input_quantities, "delta_TT")},
-        remobilization_fraction_leaf_to_rhizome_ip{get_input(input_quantities, "remobilization_fraction_leaf_to_rhizome")},
-        remobilization_fraction_stem_to_rhizome_ip{get_input(input_quantities, "remobilization_fraction_stem_to_rhizome")},
-        remobilization_fraction_root_to_rhizome_ip{get_input(input_quantities, "remobilization_fraction_root_to_rhizome")},
-        remobilization_fraction_rhizome_to_rhizome_ip{get_input(input_quantities, "remobilization_fraction_rhizome_to_rhizome")},
-        leaf_turnover_rate_ip{get_input(input_quantities, "leaf_turnover_rate")},
-        stem_turnover_rate_ip{get_input(input_quantities, "stem_turnover_rate")},
-        root_turnover_rate_ip{get_input(input_quantities, "root_turnover_rate")},
-        rhizome_turnover_rate_ip{get_input(input_quantities, "rhizome_turnover_rate")},
-        TTc_leafsenescence_threshold_ip{get_input(input_quantities, "TTc_leafsenescence_threshold")},
-        TTc_stemsenescence_threshold_ip{get_input(input_quantities, "TTc_stemsenescence_threshold")},
-        TTc_rootsenescence_threshold_ip{get_input(input_quantities, "TTc_rootsenescence_threshold")},
-        TTc_rhizomesenescence_threshold_ip{get_input(input_quantities, "TTc_rhizomesenescence_threshold")},
-        Tfrostlow_ip{get_input(input_quantities, "Tfrostlow")},
-        Tfrosthigh_ip{get_input(input_quantities, "Tfrosthigh")},
-        temp_ip{get_input(input_quantities, "temp")},
-        StomataWS_ip{get_input(input_quantities, "StomataWS")},
-        soil_field_capacity_ip{get_input(input_quantities, "soil_field_capacity")},
-        phi_waterstress_induced_leafsenescence_ip{get_input(input_quantities, "phi_waterstress_induced_leafsenescence")},
-        sene_factor_when_sws_eq_0_ip{get_input(input_quantities, "sene_factor_when_sws_eq_0")},
-        sene_factor_when_sws_eq_1_ip{get_input(input_quantities, "sene_factor_when_sws_eq_1")},
-        
-        // Get pointers to output parameters
-        Leaf_op{get_op(output_quantities, "Leaf")},
-        LeafLitter_op{get_op(output_quantities, "LeafLitter")},
-        Stem_op{get_op(output_quantities, "Stem")},
-        StemLitter_op{get_op(output_quantities, "StemLitter")},
-        Root_op{get_op(output_quantities, "Root")},
-        RootLitter_op{get_op(output_quantities, "RootLitter")},
-        Rhizome_op{get_op(output_quantities, "Rhizome")},
-        RhizomeLitter_op{get_op(output_quantities, "RhizomeLitter")},
-        Grain_op{get_op(output_quantities, "Grain")}
-    {   
+          // Get references to input quantities
+          fractional_doy{get_input(input_quantities, "fractional_doy")},
+          sowing_fractional_doy{get_input(input_quantities, "sowing_fractional_doy")},
+          temp{get_input(input_quantities, "temp")},
+          tbase{get_input(input_quantities, "tbase")},
+          topt_lower{get_input(input_quantities, "topt_lower")},
+          topt_upper{get_input(input_quantities, "topt_upper")},
+          tmax{get_input(input_quantities, "tmax")},
+          // Get pointers to output quantities
+          delta_TT_op{get_op(output_quantities, "delta_TT")}
+    {
     }
     static string_vector get_inputs();
     static string_vector get_outputs();
-    static std::string get_name() { return "miscanthus_senescence"; }
-    private:
-    // Pointers to input parameters
-        const double& Leaf_ip;
-        const double& Stem_ip;
-        const double& Root_ip;
-        const double& Rhizome_ip;
-        const double& lai_max_ip;
-        const double& lai_ip;
-        const double& Sp_ip;
-        const double& TTc_ip;
-        const double& delta_TT_ip;
-        const double& remobilization_fraction_leaf_to_rhizome_ip;
-        const double& remobilization_fraction_stem_to_rhizome_ip;
-        const double& remobilization_fraction_root_to_rhizome_ip;
-        const double& remobilization_fraction_rhizome_to_rhizome_ip;
-        const double& leaf_turnover_rate_ip;
-        const double& stem_turnover_rate_ip;
-        const double& root_turnover_rate_ip;
-        const double& TTc_leafsenescence_threshold_ip;
-        const double& TTc_stemsenescence_threshold_ip;
-        const double& TTc_rootsenescence_threshold_ip;
-        const double& TTc_rhizomesenescence_threshold_ip;
-        const double& rhizome_turnover_rate_ip;
-        const double& Tfrostlow_ip;
-        const double& Tfrosthigh_ip;
-        const double& temp_ip;
-        const double& soil_field_capacity_ip;
-        const double& StomataWS_ip;
-        const double& phi_waterstress_induced_leafsenescence_ip;
-        const double& sene_factor_when_sws_eq_0_ip;
-        const double& sene_factor_when_sws_eq_1_ip;
+    static std::string get_name() { return "delta_TT"; }
 
-    // Pointers to output parameters
-        double* Leaf_op;
-        double* LeafLitter_op;
-        double* Stem_op;
-        double* StemLitter_op;
-        double* Root_op;
-        double* RootLitter_op;
-        double* Rhizome_op;
-        double* RhizomeLitter_op;
-        double* Grain_op;
+   private:
+    // References to input quantities
+    double const& fractional_doy;
+    double const& sowing_fractional_doy;
+    double const& temp;
+    double const& tbase;
+    double const& topt_lower;
+    double const& topt_upper;
+    double const& tmax;
+
+    // Pointers to output quantities
+    double* delta_TT_op;
+
     // Main operation
-    void do_operation() const override final;
+    void do_operation() const;
 };
 
-string_vector miscanthus_senescence::get_inputs() 
+string_vector delta_TT::get_inputs()
 {
-	return {
-		"Leaf", 
-        "Stem", 
-        "Root", 
-        "Rhizome",
-		"lai_max",
-        "lai",
-        "Sp",
-        "TTc", 
-        "delta_TT",
-        "remobilization_fraction_leaf_to_rhizome", 
-		"remobilization_fraction_stem_to_rhizome", 
-		"remobilization_fraction_root_to_rhizome", 
-		"remobilization_fraction_rhizome_to_rhizome", 
-		"leaf_turnover_rate",
-		"stem_turnover_rate",
-		"root_turnover_rate",
-		"rhizome_turnover_rate",
-		"TTc_leafsenescence_threshold",
-		"TTc_stemsenescence_threshold",
-		"TTc_rootsenescence_threshold",
-		"TTc_rhizomesenescence_threshold",
-		"Tfrostlow", "Tfrosthigh","temp",
-		"soil_field_capacity", 
-        "StomataWS",
-        "phi_waterstress_induced_leafsenescence",
-        "sene_factor_when_sws_eq_0",
-		"sene_factor_when_sws_eq_1"
-	};
+    return {
+        "fractional_doy",         // days
+        "sowing_fractional_doy",  // days
+        "temp",                   // degrees C
+        "tbase",                  // degrees C
+        "topt_lower",             // degrees C
+        "topt_upper",             // degrees C
+        "tmax"                    // degrees C
+    };
 }
 
-string_vector miscanthus_senescence::get_outputs() 
+string_vector delta_TT::get_outputs()
 {
-	return {
-		"Leaf", 
-        "LeafLitter",
-        "Stem", 
-        "StemLitter",
-		"Root", 
-        "RootLitter", 
-        "Rhizome", 
-        "RhizomeLitter",
-        "Grain"
-	};
+    return {
+        "delta_TT"  // degrees C * day / hr
+    };
 }
 
-void miscanthus_senescence::do_operation() const 
-{  
-    double Leaf = Leaf_ip; //Current leaf biomass, Mg/ha
-    double Stem = Stem_ip; // current stem biomass, Mg/ha
-    double Root = Root_ip; // current root biomass, Mg/ha
-    double Rhizome = Rhizome_ip; // current rhizome biomass, Mg/ha
-    double lai_max = lai_max_ip; //maximum permissible leaf area index
-    double lai = lai_ip; //maximum permissible leaf area index
-    double Sp = Sp_ip; //maximum permissible leaf area index
-    double TTc = TTc_ip;
-    double delta_TT = delta_TT_ip;
-    double remobilization_fraction_leaf_to_rhizome = remobilization_fraction_leaf_to_rhizome_ip; // remobilization fraction from leaf to rhizome upon senescence
-    double remobilization_fraction_stem_to_rhizome = remobilization_fraction_stem_to_rhizome_ip;
-    double remobilization_fraction_root_to_rhizome = remobilization_fraction_root_to_rhizome_ip;
-    double remobilization_fraction_rhizome_to_rhizome = remobilization_fraction_rhizome_to_rhizome_ip;
-    double leaf_turnover_rate = leaf_turnover_rate_ip;
-    double stem_turnover_rate = stem_turnover_rate_ip;
-    double root_turnover_rate = root_turnover_rate_ip;
-    double rhizome_turnover_rate = rhizome_turnover_rate_ip;
-    double TTc_leafsenescence_threshold = TTc_leafsenescence_threshold_ip;
-    double TTc_stemsenescence_threshold = TTc_stemsenescence_threshold_ip;
-    double TTc_rootsenescence_threshold = TTc_rootsenescence_threshold_ip;
-    double TTc_rhizomesenescence_threshold = TTc_rhizomesenescence_threshold_ip;
-    double Tfrostlow = Tfrostlow_ip;
-    double Tfrosthigh = Tfrosthigh_ip;
-    double temp = temp_ip;
-    double soil_field_capacity = soil_field_capacity_ip;
-    double StomataWS = StomataWS_ip;
-    double phi_waterstress_induced_leafsenescence = phi_waterstress_induced_leafsenescence_ip;
-    double sene_factor_when_sws_eq_0 = sene_factor_when_sws_eq_0_ip;
-    double sene_factor_when_sws_eq_1 = sene_factor_when_sws_eq_1_ip;
+void delta_TT::do_operation() const
+{
+    double const rate_per_day_delta =
+        fractional_doy < sowing_fractional_doy ? 0.0
+        : temp <= tbase                        ? 0.0
+        : temp <= topt_lower                   ? temp - tbase
+        : temp <= topt_upper                   ? topt_lower - tbase
+        : temp <= tmax                         ? (tmax - temp) * (topt_lower - tbase) / (tmax - topt_upper)
+                                               : 0.0;  // degrees C
 
-	  double senescence_leaf_frost = std::max(0.0, std::min(1.0,(Tfrosthigh - temp) / (Tfrosthigh - Tfrostlow))) * Leaf*0.005; // Amount of leaf senesced due to frost, Mg/ha
-	  double senescence_leaf_lightcompetition = (lai > lai_max) ? (lai - lai_max)/Sp : 0.0 ; // Amount of leaf senesced due to light competition, Mg/ha
-	  double senescence_leaf_ageing = (TTc > TTc_leafsenescence_threshold) ? Leaf*leaf_turnover_rate*delta_TT : 0.0;
-   
-    double waterstress_factor_on_senescence = (sene_factor_when_sws_eq_1 - sene_factor_when_sws_eq_0) * StomataWS + sene_factor_when_sws_eq_0;
-    
-    
-    double senescence_leaf;
-    if (senescence_leaf_lightcompetition > senescence_leaf_frost){
-      senescence_leaf = (senescence_leaf_lightcompetition > senescence_leaf_ageing) ? senescence_leaf_lightcompetition : senescence_leaf_ageing;
-    }else{
-        senescence_leaf = (senescence_leaf_frost > senescence_leaf_ageing) ? senescence_leaf_frost : senescence_leaf_ageing;
-    } 
-    
-    double senescence_root = (TTc > TTc_rootsenescence_threshold) ? Root * root_turnover_rate * waterstress_factor_on_senescence :0.0 ;
-    double senescence_stem = (TTc > TTc_stemsenescence_threshold) ? Stem * stem_turnover_rate: 0.0 ; // Amount of stem senesced in Mg/ha, update it if needed
-    double senescence_rhizome = (TTc > TTc_rhizomesenescence_threshold) ? Rhizome*rhizome_turnover_rate * waterstress_factor_on_senescence : 0.0; // Amount of rhizome senesced in Mg/ha
-    
-    
-    double dLeaf = -senescence_leaf; 
-    double dLeafLitter = senescence_leaf * (1 - remobilization_fraction_leaf_to_rhizome); // part of senescced leaf that does not remobilize become leaf litter
-    
-    double dStem = -senescence_stem; // No stem senescence for now. Need to update it later
-    double dStemLitter = senescence_stem * (1 - remobilization_fraction_stem_to_rhizome); // part of senescced stem that does not remobilize become stem litter
-    
-    double dRoot = -senescence_root; //no root senesnce for now. Need to update it later
-    double dRootLitter = senescence_root* (1 - remobilization_fraction_root_to_rhizome); // part of senescced roots that does not remobilize become leaf litter
-    
-    double dRhizome = -senescence_rhizome + 
-                      senescence_leaf * remobilization_fraction_leaf_to_rhizome +
-                      senescence_stem * remobilization_fraction_stem_to_rhizome +
-                      senescence_root * remobilization_fraction_root_to_rhizome +
-                      senescence_rhizome * remobilization_fraction_rhizome_to_rhizome;
-    
-    double dRhizomeLitter = senescence_rhizome * (1-remobilization_fraction_rhizome_to_rhizome);
-    
-    double dGrain = 0.0 ; // Grain is zero. I am avoiding using kGrain here as I removed this from the list of inputs
+    // Convert to an hourly rate
+    double const rate_per_hour_delta = rate_per_day_delta / 24.0;  // degrees C * day / hr
 
-    
-    update(Leaf_op, dLeaf); // Mg/ha
-    update(Stem_op, dStem); // Mg/ha
-    update(Root_op, dRoot); // Mg/ha
-    update(Rhizome_op, dRhizome); // Mg/ha
-    update(Grain_op, dGrain); // Mg/ha
-    
-    update(LeafLitter_op, dLeafLitter); // Mg/ha
-    update(StemLitter_op, dStemLitter); // Mg/ha
-    update(RootLitter_op, dRootLitter); // Mg/ha
-    update(RhizomeLitter_op, dRhizomeLitter); // Mg/ha
-    
+    // Update the output quantity list
+    update(delta_TT_op, rate_per_hour_delta);
 }
-} // namespace BioCroBML
+
+}  // namespace BioCroBML
 #endif
-
